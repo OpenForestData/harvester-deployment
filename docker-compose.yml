@@ -1,0 +1,144 @@
+version: '3.7'
+
+services:
+
+  harvester_traefik:
+    image: "traefik:v2.2"
+    container_name: "harvester_traefik"
+    restart: unless-stopped
+    command:
+        - "--providers.docker=true"
+        - "--providers.docker.exposedbydefault=true"
+        - "--api.insecure=true"
+        - "--entrypoints.web.address=:80"
+        - "--entrypoints.web.forwardedheaders.insecure"
+        - "--entrypoints.web.proxyprotocol.insecure"
+    ports:
+        - 80:80
+    volumes: 
+        - "/var/run/docker.sock:/var/run/docker.sock:ro"
+    networks: 
+        - harvester_network
+
+  harvester_db:
+    container_name: "harvester_db"
+    image: "postgres:12-alpine"
+    restart: unless-stopped
+    volumes:
+      - harvester_db:/var/lib/postgresql
+    environment:
+      - POSTGRES_USER=harvesteruser
+      - POSTGRES_PASSWORD=PasswordHere123
+      - POSTGRES_DB=harvester
+    networks:
+      - harvester_network
+
+  harvester_redis:
+    container_name: "harvester_redis"
+    image: "redis:6-alpine"
+    restart: unless-stopped
+    networks: 
+      - harvester_network
+
+  harvester_backend: &harvester_backend
+    container_name: "harvester_backend"
+    image: "registry.gitlab.whiteaster.com/openforestdata/backend/harverster:latest"
+    restart: unless-stopped
+    volumes:
+      - admin_statics:/usr/local/lib/python3.8/site-packages/django/contrib/admin/static/
+    environment:
+      - DEBUG=False
+      - SECRET_KEY=secretdjangokey1234
+      - DB_ENGINE=django.db.backends.postgresql_psycopg2
+      - DB_NAME=harvester
+      - URL=${URL}
+      - DB_HOST=harvester_db
+      - DB_USER=harvesteruser
+      - DB_PASSWORD=PasswordHere123
+      - CELERY_BROKER_URL=redis://harvester_redis:6379/0
+      - DATAVERSE_URL=https://data-epuszcza.biaman.pl/
+      - DATAVERSE_API_KEY=dataverse_api_key_here
+      - LAYERS_PARENT_DATAVERSE=map
+      - MAPS_PARENT_DATAVERSE=map
+      - DOCUMENTS_PARENT_DATAVERSE=map
+      - DASHBOARDS_PARENT_DATAVERSE=meteo
+      - STUDIES_PARENT_DATAVERSE=dataibs
+      - GEONODE_URL=https://gis.openforestdata.pl/
+      - GRAFANA_URL=https://openforestdata.pl/grafana/
+      - GRAFANA_API_KEY=grafana_api_key_here
+      - ORTHANC_URL=https://ct.openforestdata.pl/
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.harvester_backend.rule=Host(`${URL}`) && PathPrefix (`/admin`)
+      - traefik.http.services.harvester_backend.loadbalancer.server.port=8000
+      - traefik.http.routers.harvester_backend.entrypoints=web
+      - traefik.http.middlewares.harvester_backend.headers.accesscontrolallowmethods=GET,OPTIONS,PUT,POST,DELETE,PATCH
+      - traefik.http.middlewares.harvester_backend.headers.accesscontrolalloworigin=origin-list-or-null
+      - traefik.http.middlewares.harvester_backend.headers.accesscontrolmaxage=100
+      - traefik.http.middlewares.harvester_backend.headers.addvaryheader=true
+    networks:
+      - harvester_network
+
+  harvester_celery:
+    <<: *harvester_backend
+    image: "registry.gitlab.whiteaster.com/openforestdata/backend/harverster:latest"
+    restart: unless-stopped
+    volumes: []
+    container_name: "harvester_celery"
+    labels: []
+    command: 'sh -c "/app/docker/entrypoint-celery.sh"'
+
+  harvester_flower:
+    container_name: "harvester_flower"
+    image: "mher/flower"
+    restart: unless-stopped
+    volumes:
+      - flower_statics:/usr/local/lib/python3.8/site-packages/flower/static
+    command: ["flower", "--basic_auth=flower:flower"]
+    environment:
+      - CELERY_BROKER_URL=redis://harvester_redis:6379/0
+      - FLOWER_PORT=8888
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.harvester_flower.rule=Host(`${URL}`) && PathPrefix (`/dashboard`, `/broker`, `/monitor`, `/tasks`, `/logout`, `/worker`, `/api`, `/task`)
+      - traefik.http.services.harvester_flower.loadbalancer.server.port=8888
+      - traefik.http.routers.harvester_flower.entrypoints=web
+      - traefik.http.middlewares.harvester_flower.headers.accesscontrolallowmethods=GET,OPTIONS,PUT,POST,DELETE,PATCH
+      - traefik.http.middlewares.harvester_flower.headers.accesscontrolalloworigin=origin-list-or-null
+      - traefik.http.middlewares.harvester_flower.headers.accesscontrolmaxage=100
+      - traefik.http.middlewares.harvester_flower.headers.addvaryheader=true
+    networks:
+      - harvester_network
+
+  harvester_nginx:
+    image: "nginx:1.19-alpine"
+    container_name: "harvester_nginx"
+    restart: unless-stopped
+    volumes:
+      - ./default.conf:/etc/nginx/conf.d/default.conf
+      - flower_statics:/flower_statics
+      - admin_statics:/admin_statics
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.harvester_nginx.rule=Host(`${URL}`)
+      - traefik.http.services.harvester_nginx.loadbalancer.server.port=80
+      - traefik.http.routers.harvester_nginx.entrypoints=web
+      - traefik.http.middlewares.harvester_nginx.headers.accesscontrolallowmethods=GET,OPTIONS,PUT,POST,DELETE,PATCH
+      - traefik.http.middlewares.harvester_nginx.headers.accesscontrolalloworigin=origin-list-or-null
+      - traefik.http.middlewares.harvester_nginx.headers.accesscontrolmaxage=100
+      - traefik.http.middlewares.harvester_nginx.headers.addvaryheader=true
+    networks:
+      - harvester_network
+
+
+  # volumes definiton
+volumes:
+  harvester_db:
+  redis_data:
+  flower_statics:
+  admin_statics:
+
+# network definition
+networks:
+  harvester_network:
+    driver: bridge
